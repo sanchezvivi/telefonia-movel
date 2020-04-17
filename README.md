@@ -6,7 +6,7 @@ O trabalho foi realizado em duas etapas:
 
 - Python (Jupyter Notebook) - Tratamento dos dados e análise gráfica
 
-- R (R markdown) - Processamento e modelagem dos dados
+- R (R markdown e html) - Processamento e modelagem dos dados
 
 Na modelagem supervisionada dos dados foram comparados 5 modelos de classificação: Regressão Logística, LASSO, KNN, Floresta Aleatória e Boosting. Considerando as métricas estabelecidas, foi selecionado o melhor modelo.  Também foi analisada a importância das variáveis.
 
