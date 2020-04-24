@@ -1,0 +1,118 @@
+Sugestão de tratamento das variáveis
+
+
+IDTNS: codigo indentificacao
+TIPO: pre
+OPERADORA: Algar, Claro, Nextel, Oi, Sercomtel, Tim, Vivo
+ESTADO
+DATA: 2015-2019
+ANO_BASE: 2015-2019
+
+
+PERFIL
+Q5_responsavel_recarga: se é o responsável pela recarga; 1, 2 (nao)
+Q8_idade: 18-98, 999999 se recusou a responder
+Q8a_faixa_de_idade: 
+	3: De 18 a 24 anos
+	4: De 25 a 30 anos
+	5: De 31 a 35 anos
+	6: De 36 a 40 anos
+	7: De 41 a 50 anos
+	8: De 51 a 70 anos
+	9: Mais de 70 anos
+Q9_genero
+
+H0_municipio
+H1_pessoas_renda_casa: 1-20, 99, 99999
+H2_renda_mensal: 100-400000, 999998, 999999
+H2a_faixa_renda: 1-5 (depende do ano), 98, 99, 999998
+	Opções - 2015
+	1: Até R$ 788 (até 1 SM)
+	2: Mais de R$ 788 até R$ 1576 (de 1 a 2 SM)
+	3: Mais de R$ 1576 até R$ 3152 (de 3 a 4 SM)
+	4: Mais de R$ 3152 até R$ 4728 (de 4 a 6 SM)
+	5: Mais de R$ 4728 até R$ 7880 (de 6 a 10 SM)
+	6: Mais de R$7880 (acima de 10 SM)
+	999998	Recusa
+	
+	Opções - 2016
+	1: Até R$ 1.760,00 (até 2 SM)
+	2: De R$ 1.760,00 a R$ 3.520,00 (de 2 a 4 SM)
+	3: Mais de R$ 3.520,00 até R$ 5.280,00 (de 4 a 6 SM)
+	4: Mais de R$ 5.280,00 até R$ 8.800,00 (de 6 a 10 SM)
+	5: Acima de R$ 8.800,00 (acima de 10 SM)
+	999998	Recusa
+
+	Opções - 2017
+	1: Até R$ 1.874,00 (até 2 SM)
+	2: De R$ 1.874,00 a R$ 3.748,00 (de 2 a 4 SM)
+	3: Mais de R$ 3.748,00  até R$ 5.622,00 (de 4 a 6 SM)
+	4: Mais de R$ 5.622,00 até R$ 9.370,00 (de 6 a 10 SM)
+	5: Acima de R$ 9.370,00 (acima de 10 SM)
+	999998	Não respondeu
+
+	Opções - 2018, 2019 ???
+	98, 99 não respondeu ???
+
+
+G1_existe_outra_operadora: 1 (sim), 2 (nao), 3 (não sabe)
+
+PESO: 0-11; peso do extrato (UF x prestadora) na amostra
+
+
+SATISFACAO
+J1_satisfacao_geral: 0-10, 99 se recusou a responder
+
+B1_1_facilidade_entender_planos: 0-10, 99 se recusou a responder
+B1_2_operadora_cumpre_prometido: 0-10, 99 se recusou a responder
+
+C1_1_capacidade_fazer_ligacoes: 0-10, 99 se recusou a responder
+C1_2_qualidade_ligacoes: 0-10, 99 se recusou a responder
+
+D1_utiliza_internet: 1, 2
+D2_1_capacidade_acessar_internet: 0-10, 99 se recusou a responder, NA
+D2_2_capacidade_manter_conexao: 0-10, 99 se recusou a responder, NA
+D2_3_velocidade_internet: 0-10, 99 se recusou a responder, NA
+
+E1_1_cobranca_deacordo_contratado: 0-10, 99 se recusou a responder
+E1_2_clareza_conta: 0-10, 99 se recusou a responder
+E1_3_valores_para_recarga: 0-10, 99 se recusou a responder
+
+
+CANAIS DE ATENDIMENTO
+A1_1_usou_atendimento_telefone: 1, NA
+A2_1_tempo_espera_at_telefone: 0-10, 99 se recusou a responder, NA
+A2_2_repetir_chamada_at_telefone: 0-10, 99 se recusou a responder, NA
+A2_1_capacidade_esclarecer_at_telefone: 0-10, 99 se recusou a responder, NA
+A3_nota_atendimento_telefonico: 0-10, 99 se recusou a responder, NA
+
+A1_2_usou_atendimento_internet: 2, NA
+A4_nota_atendimento_internet: 0-10, 99 se recusou a responder, NA
+
+A1_3_usou_atendimento_loja: 3, NA
+A5_nota_atendimento_loja: 0-10, 99 se recusou a responder, NA
+
+A1_4_não_usou_atendimento: 97, NA
+
+
+CAPACIDADE DE RESOLUCAO
+F1_problema_recarga: 1, 2
+F2_nota_resolucao_recarga: 0-10, 99 se recusou a responder, NA
+F3_problema_ligacao: 1, 2
+F4_nota_resolucao_ligacao: 0-10, 99 se recusou a responder, NA
+F5_problema_ligacao: 1, 2, NA
+F6_nota_resolucao_internet: 0-10, 99 se recusou a responder, NA
+
+
+ELIMINAR
+Q1 eliminar: se quis ou não responder a pesquisa; todas respostas 1
+Q2 eliminar: se é ligada a órgão público ou operadora; respostas 2 ou 7 significam não
+Q3 eliminar: se a linha é da operadora citada; todas respostas 1
+Q4 eliminar: se é o principal usuário; todas respostas 1
+Q6 eliminar: se é PF ou PJ; todas as respostas são 1 (PF)
+Q7 eliminar: tipo de conta; todas as respostas são 1 (pré-pago)
+
+I1 eliminar: autoriza identificacao dos dados; 1, 2, 3
+I2 eliminar: autoriza identificacao dos dados; 1, 2, BNA
+
+

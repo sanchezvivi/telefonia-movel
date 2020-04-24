@@ -1,0 +1,1037 @@
+---
+title: " Insper - PADS -  Atividade Integradora - Modelos Preditivos"
+author: "Viviane Sanchez (vivianecs2@al.insper.edu.br), Fernando Travaglini (fernandotbl@al.insper.edu.br)"
+date: "4/8/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.height = 5, fig.width = 5, fig.align = "center")
+
+#rmarkdown::render("integ_modelos_v7.Rmd", envir=.GlobalEnv) #cria markdown com variáveis do global env
+```
+
+# 1. Introdução
+
+## 1.1. Objetivo
+
+**Criar um classificador de satisfação (alta ou baixa) de clientes com bom desempenho preditivo.**
+
+Neste relatório serão analisados dados de entrevistas de uma pesquisa de satisfação e qualidade percebida relativa à prestação de telefonia móvel e banda larga móvel, na modalidade pré-paga, considerando a seguinte questão: 
+
+- Questão J1: Nível de satisfação geral do entrevistado com a prestadora citada, levando em conta toda a experiência
+
+- [Fonte de dados](http://www.dados.gov.br/dataset/banco-de-dados-da-pesquisa-telefonia-movel-pre-paga)
+
+## 1.2. Tratamento da base
+
+Conforme consta no enunciado do trabalho, os dados foram tratados no Python, como descrito a seguir, para posterior modelagem no R:
+- Para a variável resposta, J1, como apenas 0,15% eram dados faltantes, essas linhas foram removidas da base
+
+- Os demais dados faltantes foram tratados como "sem resposta" em 'A1_1', 'A1_2', 'A1_3', 'A1_4'
+
+- Respostas do Tipo 1 foram todas padronizadas para 1: sim e 2: não
+
+- Para facilitar a vizualização, as respostas não dadas (99) de todas as perguntas do Tipo 2 foram
+substituídas por -1
+
+- Na questão Q8, valores NA foram substituídos pela média da idade de cada faixa
+
+- Colunas com desvio padrão nulo, ou seja, que possuem apenas uma resposta e, portanto, não vão influenciar
+os modelos, foram removidas da base para otimizar o processamento: 'A1_2', 'Q1', 'Q2', 'Q3', 'Q4', 'Q6', 'Q7'
+
+- Optou-se por padronizar algumas respostas realizadas em momentos diferentes e que mudam ao longo dos anos: 'Q2' e 'H2'
+
+- H2 e H2a: respostas 999997, 999998, 999999 foram substituídas por NaN; como alguns modelos não aceitam valores faltantes, todos eles foram susbtituídos por 0. Além disso, cerca de 6% da base teve informação de renda preenchida pela faixa em uma nova coluna: H2b
+
+## 1.3. Descrição
+
+A organização, limpeza e análise gráfica foi feita em Python. A base de dados foi então importada pelo arquivo gerado "base_pre.csv". A modelagem preditiva e avaliação dos modelos aplicados foi feita em R, neste documento.
+Para selecionar o melhor classificador, serão  comparados cinco modelos de classificação em uma amostra da base: regressão logística, LASSO, KNN, floresta aleatória e boosting. Em seguida, os modelos serão  treinados e testados na base completa. O melhor modelo será aquele com a melhor performance na base de teste e melhor desempenho nas métricas selecionadas.
+Optou-se pela implementação dos modelos com o pacote [*tidymodels*](https://tidymodels.github.io/tidymodels/), que oferece um framework para tratamento e análise dos dados nos diferentes modelos aplicados neste trabalho.
+
+
+## 1.4. Bibliotecas
+```{r, message=F}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(GGally)
+library(vip)
+library(doParallel)
+```
+
+
+# 2. Dados
+```{r, message=F}
+#getwd()
+#setwd()
+
+dados_raw <- read_csv("data/base_pre.csv")
+
+skim(dados_raw)
+```
+
+
+## 2.1. Variável Resposta
+
+Para modelar a resposta adequadamente, é necessário transformá-la em fator e remover a coluna original da base a ser analisada. Também foi feita a transformação dos dias da semana em fator ordenado.. Optou-se por retirar a data e o IDTNS da base nesta primeira etapa, por serem valores exclusivos para cada linha.
+
+```{r, message = F}
+
+dados <- dados_raw %>%
+          mutate(Resposta = factor(ifelse(J1 >= 8, "Alto", "Baixo"), 
+                                  levels = c("Baixo", "Alto")),
+                 DIA_SEMANA = factor(dados_raw$DIA_SEMANA, levels = c('Sunday', 'Monday', 'Tuesday', 
+                                                'Wednesday', 'Thursday', 'Friday', 
+                                                'Saturday'),       
+                                       ordered = TRUE)) %>% 
+          select(-J1, -DATA, -IDTNS) #remove as colunas mencionadas
+  
+skim(dados$DIA_SEMANA)  
+skim(dados$Resposta) 
+```
+
+
+## 2.2. Preparação da modelagem 
+
+O pacote *tidymodels* possui uma função que separa a base em treino e teste. A opção `strata` permite fazer essa separação de forma proporcional para a variável 'Resposta' selecionada.
+
+### 2.2.1. Treino e teste
+```{r}
+set.seed(123)
+dados_split <- initial_split(dados, prop = 0.8, strata = "Resposta")
+
+dados_train <- training(dados_split)
+dados_test <- testing(dados_split)
+```
+
+
+### 2.2.2. Receita
+
+A partir do pacote *recipes*, cria-se um procedimento para processar os dados antes da modelagem. Com a receita definida, o mesmo procedimento pode ser aplicado facilmente a outras bases que serão processadas nos diferentes modelos analisados. 
+
+Os seguintes passos são realizados:
+-`update_role`: informar ao modelo que as colunas indicadas não devem ser consideradas como preditoras
+
+-`step_other`: reduzir o número de ocorrências da variável para facilitar o processamento após a transformação em dummy
+
+-`step_ordinalscore`: transforma a ordem dos fatores em números
+
+-`step_dummy`: transformar caracteres em novas colunas com 0 ou 1
+
+-`step_normalize`: normalizar a base
+
+
+```{r}
+
+(dados_rec <- recipe(Resposta ~ ., data = dados_train) %>%
+  #update_role(IDTNS, DATA, new_role = 'ID') %>% 
+  #update_role(PESO, new_role = 'weight') %>%
+  step_other(ESTADO,  threshold = 0.04) %>% 
+  step_other(H0, threshold = 0.01) %>%
+  step_ordinalscore(DIA_SEMANA) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  #step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors(), -DIA_SEMANA) %>% 
+  prep())
+
+```
+
+Com a receita criada, é necessário aplicá-la aos *initial splits* através das funções `juice` (caso particular para a base de treino) e `bake`.
+
+```{r}
+train_baked <- juice(dados_rec) 
+
+skim(train_baked)
+
+test_baked <- bake(dados_rec, new_data = dados_test)
+
+```
+
+
+### 2.2.3. Reamostragem Cross-Validation
+
+Com as bases separadas, o próximo passo é a criação de amostras cross-validation para avaliar o desempenho dos modelos. Para otimizar o processamento de comparação nos splits em cross-validation, foi selecionada uma amostra equivalente a **30%** da base. 
+Antes de selecionar essa proporção, o procedimento foi realizado com amostras de 40% e 50%. Os resultados obtidos foram muito semelhantes, porém com tempo de processamento consideravelmente maior. 
+
+```{r}
+
+set.seed(123)
+(cv_splits <- train_baked %>% 
+              sample_frac(0.3) %>% 
+              vfold_cv(v = 5, strata = Resposta))
+
+```
+
+
+# 3. Modelos de Classificação
+
+Na modelagem com o pacote *tidymodels*, é preciso fazer a especificação dos modelos antes de seu ajuste nas amostras cross-validation.
+Foram utilizadas as seguintes métricas para comparação do desempenho: área sob a curva ROC (roc_auc), sensibilidade (recall), especificidade (spec) e precisão (precision). Para seleção do melhor modelo, será considerada a maior área sob a curva ROC nos v-folds criados. As outras métricas também serão levadas em consideração dependendo do caso.
+
+## 3.1. Regressão Logística
+
+A regressão logística é o modelo clássico utilizado para problemas de classificação, portanto, será o primeiro modelo ajustado.
+
+```{r}
+
+log_spec <- logistic_reg() %>%
+            set_engine("glm") %>% 
+            set_mode("classification")
+
+log_res <- fit_resamples(Resposta ~ .,
+                          log_spec,
+                          cv_splits, 
+                          metrics = metric_set(roc_auc, spec, recall, precision),
+                          control = control_resamples(save_pred = TRUE))
+  
+```
+
+Após o modelo ser ajustado, é possível avaliar o valor das métricas e a matriz de confusão:
+```{r}
+
+log_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  summary()
+
+log_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  autoplot()
+
+
+```
+
+## 3.2. LASSO
+
+O modelo LASSO é conhecido por selecionar as variáveis. No entanto, é necessário encontrar o lambda (penalty) ótimo antes de fazer o ajusta final. Isso é feito com a criação de uma tabela indicando a quantidade de níveis a serem testados. Para isso, foram utilizadas as funções `grid_regular` e `tune_grid`. Para acelerar o cálculo, utiliza-se o processamento em paralelo via  *doParallel*.
+
+```{r}
+
+lasso_spec <- multinom_reg(mode = "classification",
+                          penalty = tune(), 
+                          mixture = 1) %>%
+  set_engine("glmnet") #false, pois a base já foi pré-processada anteriormente 
+
+lambda_grid <- grid_regular(penalty(), levels = 50)
+
+doParallel::registerDoParallel(cores = 6) #processamento em paralelo para otimizar
+
+set.seed(123)
+lasso_tune <- tune_grid(Resposta ~.,
+  model = lasso_spec,
+  resamples = cv_splits,
+  metrics = metric_set(roc_auc, spec, recall, precision),
+  grid = lambda_grid)
+
+```
+
+
+```{r warning=FALSE}
+
+lasso_tune %>%
+  collect_metrics()
+
+lasso_tune %>%
+  collect_metrics() %>%
+  #mutate(log.lambda = log(penalty)) %>% 
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err),
+  alpha = 0.4) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free") +
+  scale_x_log10() +
+  labs(x = 'log(lambda)') +
+  theme(legend.position = "none")
+
+(lasso_best <- lasso_tune %>%
+  select_best("roc_auc", maximize = TRUE))
+
+```
+
+Com o lambda otimizado, finaliza-se o modelo:
+
+```{r warning=FALSE}
+
+lasso_final <- lasso_spec %>% 
+  finalize_model(parameters = lasso_best)
+
+
+doParallel::registerDoParallel(cores = 6)
+
+lasso_res <- fit_resamples(Resposta ~ .,
+               lasso_final,
+               cv_splits,
+               metrics = metric_set(roc_auc, recall, spec, precision),
+               control = control_resamples(save_pred = TRUE))
+    
+
+lasso_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  summary()
+
+lasso_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  autoplot()
+
+```
+
+Os resultados obtidos são muito próximos aos da Regressão Logística.
+
+## 3.3. KNN
+
+K-Nearest Neighors (KNN) é mais um dos modelos comumente utilizados para classificação. Seu ponto fraco, no entanto, está na possibilidade de "overfit" dependendo da quantidade de vizinhos selecionados para o ajuste. A seguir, serão comparados alguns modelos para encontrar o número ótimo de vizinhos: 
+
+```{r}
+
+knn_spec <- nearest_neighbor(mode = "classification",
+                             neighbors = tune()) %>%
+            set_engine("kknn")
+
+knn_grid <- grid_regular(
+  neighbors(range = c(2, 500)), 
+  levels = 5)
+  
+
+doParallel::registerDoParallel(cores = 5)
+
+knn_tune <- tune_grid(Resposta ~.,
+                      model = knn_spec,
+                      resamples = cv_splits,
+                      metrics = metric_set(roc_auc, recall, spec, precision),
+                      grid = knn_grid)
+
+
+```
+
+Avaliando os resultados, observa-se que a área sob a curva ROC, acurácia e especificidade aumentam com o número de vizinhos, por isso o perigo em selecionar um modelo que está "overfit". 
+
+```{r}
+
+knn_tune %>% 
+  collect_metrics()
+
+knn_tune %>%
+  collect_metrics() %>%
+  select(mean, neighbors, .metric) %>%
+  #filter(.metric == 'sens') %>% 
+  ggplot(aes(neighbors, mean, color = .metric)) +
+  geom_point() +
+  facet_wrap(~ .metric, scales = "free", nrow = 2)
+
+knn_best_n <- knn_tune %>%
+  select_best("roc_auc", maximize = TRUE)
+
+```
+
+Se avaliarmos a sensibilidade, observa-se que ela começa a cair a partir de k = 200. Como a diferença é muito pequena, será mantida a métrica de área sob a curva ROC para seleção do melhor modelo.
+
+Selecionando o melhor modelo:
+```{r}
+
+knn_final <-  knn_spec %>%
+    finalize_model(parameters = knn_best_n)
+
+
+doParallel::registerDoParallel(cores = 5)
+
+knn_res <- fit_resamples(Resposta ~ ., 
+                          knn_final, 
+                          cv_splits,
+                          metrics = metric_set(roc_auc, recall, spec, precision),
+                          control = control_resamples(save_pred = TRUE))
+
+knn_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  summary()
+
+knn_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  autoplot()
+
+```
+
+Pela matriz de confusão, observamos que o modelo tem um ótimo desempenho na especificidade e precisão, mas perde performance na sensibilidade por ter uma quantidade elevada de falsos negativos.
+
+## 3.4. Random Forest
+
+Normalmente, para florestas aleatórias de classificação, o número de variáveis utilizadas em cada nó (mtry) é igual a sqrt(p), em que p é o número de variáveis preditoras. Mesmo assim, será avaliado o comportamento dos modelos em relação a esse hiperparâmetro. Tendo esse número, será observado o desempenho do modelo também em relação ao número de árvores. Essa calibração é feita separaadamente devido à alta necessidade de processamento, infelizmente indisponível na máquina local.
+
+```{r}
+
+p <- ncol(train_baked) - 1
+
+rf_spec <- rand_forest(mode = "classification",
+                        mtry = tune(),
+                        trees = 500) %>%
+  set_engine("ranger", importance = "impurity")
+
+(rf_grid <- grid_regular(
+  mtry(range = c(as.integer(sqrt(p)), as.integer(p/2))),
+  #trees(range = c(2000, 5000)),
+  levels = 4))
+
+doParallel::registerDoParallel(cores = 6) #processamento em paralelo para otimizar
+
+set.seed(2020)
+rf_tune_mtry <- tune_grid(Resposta ~.,
+                      model = rf_spec,
+                      resamples = cv_splits,
+                      metrics = metric_set(roc_auc, recall, spec, precision),
+                      grid = rf_grid)
+```
+
+```{r}
+
+rf_tune_mtry %>%
+  collect_metrics() %>%
+  select(mean, mtry, .metric) %>%
+  #filter(.metric == 'roc_auc') %>% 
+  ggplot(aes(mtry, mean, color = .metric)) +
+  geom_point(show.legend = TRUE) +
+  facet_wrap(~.metric, scales = "free", nrow = 2)
+
+rf_best <- rf_tune_mtry %>%
+    select_best("roc_auc", maximize = TRUE)
+  
+  mtry_best = rf_best$mtry
+```
+
+Conforme era esperado, medindo pela curva ROC, quanto menor o mtry, melhor o desempenho do modelo. Considerando esse valor, será analisada a sensibilidade em relação ao número de árvores:
+
+```{r}
+rf_spec <- rand_forest(mode = "classification",
+                        mtry = mtry_best,
+                        trees = tune()) %>%
+  set_engine("ranger", importance = "impurity")
+
+(rf_grid <- grid_regular(
+  #mtry(range = c(sqrt(p), p/2)),
+  trees(range = c(50, 2000)),
+  levels = 5))
+
+doParallel::registerDoParallel(cores = 6) #processamento em paralelo para cada split
+
+set.seed(2020)
+rf_tune <- tune_grid(Resposta ~.,
+                      model = rf_spec,
+                      resamples = cv_splits,
+                      metrics = metric_set(roc_auc, recall, spec, precision),
+                      grid = rf_grid)
+
+```
+
+
+```{r}
+
+rf_tune %>%
+  collect_metrics() %>%
+  select(mean, trees, .metric) %>%
+  #filter(.metric == 'roc_auc') %>% 
+  ggplot(aes(trees, mean, color = .metric)) +
+  geom_point(show.legend = TRUE) +
+  facet_wrap(~.metric, scales = "free")
+
+
+rf_best <- rf_tune %>%
+    select_best("roc_auc", maximize = TRUE)
+
+(trees_best <- rf_best$trees)
+
+```
+
+Observa-se uma melhora significativa em todas as métricas a partir de 500 árvores. Acima de 1500, no entanto, apenas a área sob a curva ROC é beneficiada. Para otimizar um pouco o processamento, e visto que o desempenho do modelo não é tão melhor assim com 2000 árvores, a modelagem será feita com 1000 árvores, por ser o ponto ótimo para as demais métricas.
+
+Modelo final:
+```{r}
+
+rf_final <-  rf_spec <- rand_forest(mode = "classification",
+                        mtry = mtry_best,
+                        trees = 1000) %>%
+  set_engine("ranger", importance = "impurity")
+
+
+doParallel::registerDoParallel(cores = 6)
+
+rf_res <- fit_resamples(Resposta ~ .,
+               rf_final,
+               cv_splits,
+               metrics = metric_set(roc_auc, recall, spec, precision),
+               control = control_resamples(save_pred = TRUE))
+
+rf_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  summary()
+
+rf_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  autoplot()
+```
+
+
+## 3.5. Boosting
+
+Assim como na floresta aleatória, os hiperparâmetros serão analisados separadamente. Primeiro será analisada a sensibilidade em relação ao número de árvores e posteriormente à taxa de aprendizagem (learning_rate).
+
+```{r}
+
+p <- ncol(train_baked) - 1 
+
+boost_spec <- boost_tree(mode = "classification",
+                        trees = tune()) %>%
+  set_engine("xgboost", importance = "TRUE")
+
+(boost_grid <- grid_regular(
+  trees(range = c(50, 2000)),
+  levels = 5))
+
+doParallel::registerDoParallel(cores = 6) #processamento em paralelo para otimizar
+
+set.seed(2020)
+boost_tune_trees <- tune_grid(Resposta ~.,
+                      model = boost_spec,
+                      resamples = cv_splits,
+                      metrics = metric_set(roc_auc, recall, spec, precision),
+                      grid = boost_grid)
+
+```
+
+Análise dos hiperparâmetros:
+
+```{r}
+
+boost_tune_trees %>%
+  collect_metrics() %>%
+  ggplot(aes(trees, mean, color = .metric)) +
+  geom_point(show.legend = TRUE) +
+  facet_wrap(~.metric, scales = "free", nrow = 2)
+
+
+boost_tune_trees %>%
+  show_best("roc_auc")
+
+
+  boost_best <- boost_tune_trees %>%
+    select_best("roc_auc", maximize = TRUE)
+  
+  trees_boost <- boost_best$trees
+
+```
+
+A melhor resposta para a curva ROC e para as demais métricas se deu com o menor número de árvores. A seguir, será avaliada a taxa de aprendizagem do modelo.
+
+```{r}
+
+boost_spec <- boost_tree(mode = "classification",
+                        trees = trees_boost,
+                        learn_rate = tune()) %>%
+  set_engine("xgboost", importance = "TRUE")
+
+
+(boost_grid <- grid_regular(
+  learn_rate(range = c(-5, 0.5)),
+  levels = 5))
+
+doParallel::registerDoParallel(cores = 6) #processamento em paralelo para otimizar
+
+set.seed(2020)
+boost_tune <- tune_grid(Resposta ~.,
+                      model = boost_spec,
+                      resamples = cv_splits,
+                      metrics = metric_set(roc_auc, recall, spec, precision),
+                      grid = boost_grid)
+
+
+
+```
+
+
+```{r}
+
+boost_tune %>%
+  collect_metrics() %>%
+  ggplot(aes(learn_rate, mean, color = .metric)) +
+  geom_point(show.legend = TRUE) +
+  scale_x_log10() +
+  facet_wrap(~.metric, scales = "free", nrow = 2)
+
+
+boost_tune %>%
+  show_best("roc_auc")
+
+
+  boost_best <- boost_tune %>%
+    select_best("roc_auc", maximize = TRUE)
+  
+```
+
+Modelo final:
+
+```{r}
+
+boost_final <-  boost_spec %>%
+    finalize_model(parameters = boost_best)
+
+
+doParallel::registerDoParallel(cores = 6)
+
+boost_res <- fit_resamples(Resposta ~ .,
+               boost_final,
+               cv_splits,
+               metrics = metric_set(roc_auc, recall, spec, precision),
+               control = control_resamples(save_pred = TRUE))
+
+
+boost_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  summary()
+
+boost_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Resposta, .pred_class) %>% 
+  autoplot()
+
+```
+
+
+# 4. Resultados
+
+## 4.1. Desempenho nos v-folds:
+```{r}
+
+cv_res <- log_res %>% 
+  unnest(.metrics) %>% 
+  mutate(model = "logistica") %>% 
+  bind_rows(knn_res %>% 
+            unnest(.metrics) %>% 
+            mutate(model = "knn")) %>% 
+   bind_rows(lasso_res %>% 
+            unnest(.metrics) %>% 
+            mutate(model = "lasso")) %>% 
+    bind_rows(rf_res %>% 
+            unnest(.metrics) %>% 
+            mutate(model = "rf")) %>% 
+  bind_rows(boost_res %>% 
+            unnest(.metrics) %>% 
+            mutate(model = "boost")) 
+
+cv_res %>% 
+  ggplot(aes(id, .estimate, group = model, color = model)) + 
+  geom_point(size = 1) + 
+  #geom_hline(yintercept = mean(cv_res$.estimate), group = model, size = 1, alpha = 0.5) +
+  geom_line(size = 1, alpha = 0.5) +
+  facet_wrap(~.metric, scales = "free") + 
+  coord_flip()
+
+```
+
+Nos gráficos, observa-se que o desempenho da floresta aleatória foi o melhor em quase todas as métricas, ficando para trás apenas na especificidade. 
+
+## 4.2. Curva ROC
+```{r}
+results_train_sample <- log_res %>% 
+  unnest(.predictions) %>% 
+  mutate(model = "logistica") %>% 
+  bind_rows(knn_res %>% 
+            unnest(.predictions) %>% 
+            mutate(model = "knn")) %>%
+  bind_rows(lasso_res %>% 
+            unnest(.predictions) %>% 
+            mutate(model = "lasso")) %>%
+  bind_rows(rf_res %>% 
+            unnest(.predictions) %>% 
+            mutate(model = "random forest")) %>% 
+  bind_rows(boost_res %>% 
+            unnest(.predictions) %>% 
+            mutate(model = "boosting"))
+  
+  results_train_sample %>% 
+  group_by(model) %>% 
+  roc_curve(Resposta, .pred_Alto) %>% 
+  autoplot()
+  
+```
+
+```{r}
+
+curva_roc <- log_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'roc_auc') %>% 
+  mutate(model = "logistica") %>% 
+bind_rows(lasso_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'roc_auc') %>% 
+  mutate(model = "lasso")) %>%
+bind_rows(knn_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'roc_auc')%>% 
+  mutate(model = "knn")) %>% 
+bind_rows(rf_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'roc_auc')%>% 
+  mutate(model = "random forest")) %>% 
+bind_rows(boost_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'roc_auc')%>% 
+  mutate(model = "boosting"))
+  
+
+curva_roc[order(curva_roc$mean, decreasing = TRUE),] 
+  
+```
+
+Como já havia sido constatado anteriormente pelo gráfico da curva ROC e como ser observado na tabela acima, o melhor modelo é a floresta aleatória. Em segundo lugar ficou boosting, seguido pela regressão logística e lasso, praticamente empatados. Como o KNN foi o pior modelo e exige muito tempo para rodar, não será ajustado na base completa.
+
+## 4.3. Seleção do melhor modelo
+
+### 4.3.1. Ajuste na base de treino completa
+
+Com todos os modelos calibrados, é feito o ajuste na base de treino completa:
+
+```{r}
+
+doParallel::registerDoParallel(cores = 6)
+
+log_fit <- log_spec %>% 
+      fit(Resposta ~.,
+      data = train_baked)
+
+lasso_fit <- lasso_final %>% 
+            fit(Resposta ~.,
+            data = train_baked)
+
+rf_fit <- rf_final %>% 
+      fit(Resposta ~.,
+      data = train_baked)
+
+boost_fit <- boost_final %>% 
+      fit(Resposta ~.,
+      data = train_baked)
+
+```
+
+
+### 4.3.1.1. Resultados na base de treino
+
+A comparação da curva ROC nos resultados da base de treino mostra mais uma vez a melhor performance do random forest.
+
+```{r}
+results_train <- log_fit %>% 
+  predict(new_data = train_baked, type = 'prob') %>% 
+  mutate(truth = train_baked$Resposta,
+         model = 'logistica') %>% 
+  bind_rows(lasso_fit %>% 
+  predict(new_data = train_baked, type = 'prob') %>% 
+  mutate(truth = train_baked$Resposta,
+         model = 'lasso')) %>% 
+  bind_rows(rf_fit %>% 
+  predict(new_data = train_baked, type = 'prob') %>% 
+  mutate(truth = train_baked$Resposta,
+         model = 'random forest')) %>% 
+  bind_rows(boost_fit %>% 
+  predict(new_data = train_baked, type = 'prob') %>% 
+  mutate(truth = train_baked$Resposta,
+         model = 'boosting'))
+
+results_train %>% 
+  group_by(model) %>% 
+  roc_curve(truth, .pred_Alto) %>% 
+  autoplot()
+
+results_train %>% 
+  group_by(model) %>% 
+  roc_auc(truth, .pred_Alto) %>% 
+  arrange(-.estimate)
+
+```
+
+
+```{r}
+
+results_train_class <- log_fit %>% 
+  predict(new_data = train_baked, type = 'class') %>% 
+  mutate(truth = train_baked$Resposta,
+         model = 'logistica') %>% 
+  bind_rows(lasso_fit %>% 
+  predict(new_data = train_baked, type = 'class') %>% 
+  mutate(truth = train_baked$Resposta,
+         model = 'lasso')) %>% 
+  bind_rows(rf_fit %>% 
+  predict(new_data = train_baked, type = 'class') %>% 
+  mutate(truth = train_baked$Resposta,
+         model = 'random forest')) %>% 
+  bind_rows(boost_fit %>% 
+  predict(new_data = train_baked, type = 'class') %>% 
+  mutate(truth = train_baked$Resposta,
+         model = 'boosting'))
+
+cm_train <- results_train_class %>% 
+  group_by(model) %>% 
+  conf_mat(truth, .pred_class) %>% 
+  mutate(info = map(conf_mat, summary)) %>% 
+  unnest(info) %>% 
+  filter(.metric == 'spec'|.metric == 'recall'|.metric == 'precision')
+
+```
+
+Na base de treino, o melhor modelo foi a floresta aleatória.
+
+
+### 4.3.2. Importância das variáveis
+
+#### 4.3.2.1. Regressão Logística
+
+```{r}
+
+log_var <- log_fit %>% 
+  vi() %>% 
+  mutate(Importance_pct = abs(Importance)/max(abs(Importance))) %>% 
+  mutate(Variable = fct_reorder(Variable, Importance_pct)) 
+
+
+log_var %>% 
+  filter(Importance_pct > 0.05) %>% 
+  ggplot(aes(Variable, Importance_pct, color = Sign)) +
+  geom_point() +
+  coord_flip()
+
+```
+
+As variáveis ligadas à pesquisa de satisfação tiveram maior peso nesse modelo. A mais importante foi se a operadora cumpre o prometido, seguida da facilidade de entender os planos. Em terceiro aparece a capacidade de fazer ligações e em quarto a clareza da conta. Em quinto, a qualidade das ligações.
+
+#### 4.3.2.2. Lasso
+
+```{r}
+
+lasso_fit %>% 
+  tidy %>% 
+  filter(term != "", class == "Alto") %>% 
+  #arrange(term, lambda) %>% 
+  #mutate(log.lambda = log(lambda)) %>% 
+  #filter(step <=10) %>% 
+  #filter(estimate < 0.2) %>% 
+  ggplot(aes(lambda, estimate, color = term, group = term)) +
+  scale_x_log10() +
+  geom_line(show.legend = FALSE)
+  #geom_point(show.legend = FALSE)
+
+lasso_var <- lasso_fit %>%
+  vi() %>% 
+  mutate(Importance_pct = abs(Importance)/max(abs(Importance))) %>% 
+  mutate(Variable = fct_reorder(Variable, Importance_pct))
+
+#Verificaçãoda seleção das variáveis
+lasso_var %>% 
+  count(Importance_pct == 0)
+
+lasso_var %>% 
+  filter(Importance_pct > 0.05) %>% 
+  ggplot(aes(Variable,Importance_pct, color = Sign)) +
+  geom_point()+
+  scale_y_continuous(labels = scales::percent_format()) +
+  coord_flip()
+
+```
+
+No primeiro gráfico, é possível observar a selação das variáveis com a variaçao do lambda. A legenda foi omitida para facilitar a visualização. Das cinco variáveis mais importantes, três  também estavam presentes na regressão logística. Nota-se no entanto, que possuem o coeficiente negativo.
+
+#### 4.3.2.3. Random Forest
+
+```{r}
+
+rf_var <- vi(rf_fit) %>% 
+  mutate(Importance_pct = abs(Importance)/max(abs(Importance))) %>% 
+  mutate(Variable = fct_reorder(Variable, Importance_pct))
+
+rf_var %>% 
+  filter(Importance_pct > 0.05) %>% 
+  ggplot(aes(Variable, Importance_pct)) +
+  geom_point()+
+  scale_y_continuous(labels = scales::percent_format())+
+  coord_flip()
+```
+
+O resultado foi bastante semelhante à regressão logística. As cinco primeiras posições se repetiram.
+
+#### 4.3.2.4. Boosting
+
+```{r}
+boost_var <- vi(boost_fit) %>% 
+  mutate(Importance_pct = abs(Importance)/max(abs(Importance))) %>% 
+  mutate(Variable = fct_reorder(Variable, Importance_pct))
+
+boost_var %>% 
+  filter(Importance_pct > 0.005) %>% 
+  ggplot(aes(Variable, Importance_pct)) +
+  geom_point()+
+  scale_y_continuous(labels = scales::percent_format())+
+  coord_flip()
+
+```
+
+Assim como na floresta aleatória, as princnipais variáveis estavam presentes nos modelos anteriores.
+
+#### 4.3.2.5.Comparação:
+
+A seguir, é possível observar as varíaveis em comum nos modelos:
+
+```{r warning=FALSE}
+
+var_imp <- log_var %>% 
+  mutate(model = 'logistica') %>% 
+  bind_rows(lasso_var %>% 
+            mutate(model = 'lasso')) %>% 
+  bind_rows(rf_var %>% 
+             mutate(Sign ='POS',
+             model = 'random forest')) %>% 
+  #bind_rows(boost_var %>% 
+  #          mutate(Sign ='POS',
+  #          model = 'boosting')) %>%
+  arrange(-Importance_pct)
+  
+var_imp %>% 
+  filter(Importance_pct > 0.1) %>% 
+  group_by(model) %>% 
+  ggplot(aes(Variable, Importance_pct, color = model)) +
+  geom_point(alpha = 0.7) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  coord_flip()
+
+```
+
+Para melhorar a visualização, foram filtradas variáveis com importância maior que 10%. Pelo fato de boosting possuir apenas três variáveis com importância acima desse valor, foi omitido do gráfico.
+
+### 4.3.3. Performance na base de teste:
+```{r}
+
+results_test <- log_fit %>% 
+  predict(new_data = test_baked, type = 'prob') %>% 
+  mutate(truth = test_baked$Resposta,
+         model = 'logistica') %>% 
+   bind_rows(lasso_fit %>% 
+      predict(new_data = test_baked, type = 'prob') %>% 
+      mutate(truth = test_baked$Resposta,
+              model = 'lasso')) %>% 
+  bind_rows(rf_fit %>% 
+    predict(new_data = test_baked, type = 'prob') %>% 
+    mutate(truth = test_baked$Resposta,
+         model = 'random forest')) %>% 
+  bind_rows(boost_fit %>% 
+    predict(new_data = test_baked, type = 'prob') %>% 
+   mutate(truth = test_baked$Resposta,
+         model = 'boosting'))
+
+results_test %>% 
+  group_by(model) %>% 
+  #filter(model == c('boosting','random forest') ) %>% 
+  roc_curve(truth, .pred_Alto) %>% 
+  autoplot()
+
+results_test %>% 
+  group_by(model) %>% 
+  roc_auc(truth, .pred_Alto) %>% 
+  arrange(-.estimate)
+
+```
+
+Na base de teste, o modelo com maior área sob a curva ROC foi boosting. Os demais modelos ficaram praticamente empatados. Para selecionar o melhor modelo, as demais métricas serão analisadas:
+
+```{r}
+
+results_test_class <- log_fit %>% 
+  predict(new_data = test_baked, type = 'class') %>% 
+  mutate(truth = test_baked$Resposta,
+         model = 'logistica',
+         #correct = case_when(truth == .pred_class ~ "Correct", TRUE ~ "Incorrect")
+         ) %>% 
+   bind_rows(lasso_fit %>% 
+      predict(new_data = test_baked, type = 'class') %>% 
+      mutate(truth = test_baked$Resposta,
+              model = 'lasso',
+              #correct = case_when(truth == .pred_class ~ "Correct", TRUE ~ "Incorrect")
+             )) %>% 
+  bind_rows(rf_fit %>% 
+    predict(new_data = test_baked, type = 'class') %>% 
+    mutate(truth = test_baked$Resposta,
+         model = 'random forest',
+         #correct = case_when(truth == .pred_class ~ "Correct", TRUE ~ "Incorrect")
+         )) %>% 
+  bind_rows(boost_fit %>% 
+    predict(new_data = test_baked, type = 'class') %>% 
+   mutate(truth = test_baked$Resposta,
+         model = 'boosting',
+         #correct = case_when(truth == .pred_class ~ "Correct", TRUE ~ "Incorrect")
+         ))
+
+cm_test <- results_test_class %>% 
+  group_by(model) %>% 
+  conf_mat(truth, .pred_class) %>% 
+  mutate(info = map(conf_mat, summary)) %>% 
+  unnest(info) %>% 
+  filter(.metric == 'spec'|.metric == 'recall'|.metric == 'precision')
+  
+  cm_test %>% 
+    mutate(train_test = 'test') %>% 
+    bind_rows(cm_train %>% 
+                mutate(train_test = 'train')) %>% 
+  filter(model == 'boosting'| model == 'random forest') %>% 
+  ggplot(aes(model, .estimate, color = train_test)) +
+  geom_point(show.legend = TRUE) +
+  facet_wrap(~.metric, nrow = 1) +
+  theme(axis.text.x = element_text(angle = 90, hjust=1))
+
+```
+
+Como é possível observar, a floreta aleatória performou melhor em todas as métricas na base de treino.
+Jã na base de teste a performance dos modelos foi muito próxima, sendo boosting um pouco melhor, mas com uma diferença insignificativa. Portanto, a floresta aleatória será selecionada como o melhor modelo.
+
+# 5. Conclusão
+
+  A base de dados tratada em Python foi separada em treino e teste e foi utilizado também cinco amostras via cross-validation para calibração dos hiperparâmetros. Para otimizar o processamento de comparação, foi selecionada uma amostra equivalente a 40% da base. Tendo os melhores hiperparâmetros para cada modelo, fez-se o ajuste na base de treino completa. A escolha do melhor modelo se deu por comparação do desempenho nas seguintes métricas: área sob a curva ROC (roc_auc), sensibilidade (recall), especificidade (spec) e precisão (precision). 
+
+O modelo random forest apresentou os melhores resultados considerando todas as métricas tanto para a base de treino e ficou praticamente empatada com boosting na base de teste. Foi portanto, selecionado como o melhor modelo. Para ajustá-lo, utilizou-se mtry = 7 e 500 árvores, correspondente ao melhor número para sensitividade, especificidade e precisão apurado pelo modelo. Em segundo lugar ficou o modelo boosting, seguido pela regressão logística e lasso, praticamente empatadas.
+
+Quanto à importância das variáveis nos modelos, as do tipo 2, ligadas à notas para a pesquisa de satisfação, tiveram maior peso. A mais importante foi se a operadora cumpre o prometido, seguido da facilidade de entender os planos. Em terceiro aparece a capacidade de fazer ligações e em quarto a clareza da conta. Em quinto, a qualidade das ligações.
+
+```{r}
+
+rf_fit$fit
+
+```
+
+
+# 6. Referências
+
+Como referências para o desenvolvimento deste relatório foram utilizadas as seguintes fontes:
+
+- [An Introduction do Statistical Modelling - James, G. et. al.](http://faculty.marshall.usc.edu/gareth-james/ISL/ISLR%20Seventh%20Printing.pdf) 
+[The Elements of Statistical Learning - Hastie, T. et. al.](https://web.stanford.edu/~hastie/ElemStatLearn/printings/ESLII_print12.pdf) 
+- Material de aula do curso Modelos Preditivos - Insper - 2020
+- [Introdução a Tidymodels - Mendonça, T.](https://www.tiagoms.com/post/tidymodels/)
+- Julia Silge - Blog e [YouTube](https://www.youtube.com/channel/UCTTBgWyJl2HrrhQOOc710kA)
+    
+    - [Preprocessing and resampling using #TidyTuesday college data](https://juliasilge.com/blog/tuition-resampling/)
+    
+    - [LASSO regression using tidymodels and #TidyTuesday data for The Office](https://juliasilge.com/blog/lasso-the-office/)
+    
+    - [Tuning random forest hyperparameters with #TidyTuesday trees data](https://juliasilge.com/blog/sf-trees-random-tuning/)
+    
+    - [#TidyTuesday hotel bookings and recipes](https://juliasilge.com/blog/hotels-recipes/)
+    
+    - [#TidyTuesday and tidymodels](https://juliasilge.com/blog/intro-tidymodels/)
+
+- [Tidymodels documentation](https://tidymodels.github.io/tidymodels/)
+
+- [Base de dados original](http://www.dados.gov.br/dataset/banco-de-dados-da-pesquisa-telefonia-movel-pre-paga)
+
